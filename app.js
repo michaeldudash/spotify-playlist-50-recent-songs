@@ -10,11 +10,51 @@ const spotifyApi = new SpotifyWebApi({
     redirectUri: process.env.REDIRECT_URI,
 });
 
+// Function to save tokens
+const saveTokens = (accessToken, refreshToken) => {
+    // Save tokens securely (e.g., write to a file or database)
+    require('fs').writeFileSync('./tokens.json', JSON.stringify({ accessToken, refreshToken }));
+};
+
+// Function to load saved tokens
+const loadTokensFromFile = () => {
+
+    const fs = require('fs');
+    if (!fs.existsSync('./tokens.json')) {
+        console.log('No tokens.json file found. Please authenticate first.');
+        return null;
+    }
+
+    try {
+        const tokens = JSON.parse(require('fs').readFileSync('./tokens.json', 'utf8'));
+        spotifyApi.setAccessToken(tokens.accessToken);
+        spotifyApi.setRefreshToken(tokens.refreshToken);
+        return tokens;
+    } catch (err) {
+        console.error('Error loading tokens:', err.message);
+        return null;
+    }
+};
+
+
+const refreshAccessToken = async () => {
+    try {
+        const data = await spotifyApi.refreshAccessToken();
+        const accessToken = data.body['access_token'];
+        spotifyApi.setAccessToken(accessToken);
+        saveTokens(accessToken, spotifyApi.getRefreshToken());
+        console.log('Access token refreshed successfully!');
+    } catch (err) {
+        console.error('Error refreshing access token:', err.message);
+    }
+};
+
+loadTokensFromFile();
 
 const app = express();
 
 // In-memory token storage (use a database in production)
-let userAccessToken = null;
+// let userAccessToken = null;
 
 // Redirect to login from main page
 app.get('/', (req, res) => {
@@ -30,12 +70,21 @@ app.get('/login', (req, res) => {
 
 // Callback Route
 app.get('/callback', async (req, res) => {
-    const code = req.query.code;
     try {
+        const code = req.query.code;
         const data = await spotifyApi.authorizationCodeGrant(code);
-        userAccessToken = data.body['access_token'];
-        spotifyApi.setAccessToken(userAccessToken);
-        res.send('Authentication successful! You can now update playlists.');
+
+        const accessToken = data.body['access_token'];
+        const refreshToken = data.body['refresh_token']; // Save this token
+        const expiresIn = data.body['expires_in']; // Typically 3600 seconds
+
+        spotifyApi.setAccessToken(accessToken);
+        spotifyApi.setRefreshToken(refreshToken);
+
+        // Save tokens persistently (e.g., to a database or file)
+        saveTokens(accessToken, refreshToken);
+
+        res.send('Authentication successful! Tokens saved.');
 
         // Call updatePlaylist() after successful authentication
         updatePlaylist();
@@ -46,40 +95,47 @@ app.get('/callback', async (req, res) => {
 
 // Update Playlist Function
 const updatePlaylist = async () => {
-    console.log("updating playlist");
-    if (!userAccessToken) {
-        console.log('No user authenticated.');
-        return;
-    }
-    try {
-        console.log("correctly authenticated");
-        spotifyApi.setAccessToken(userAccessToken);
 
-        console.log("getting liked songs");
+    try {
+        // Ensure Spotify API has valid tokens
+        const tokens = loadTokensFromFile();
+        if (!tokens) {
+            console.log('No tokens loaded. Please authenticate first.');
+            return;
+        }
+
         // Get liked songs
         const likedTracks = await spotifyApi.getMySavedTracks({ limit: 50 });
         const trackUris = likedTracks.body.items.map(item => item.track.uri);
 
-        console.log("creating or getting the playlist");
-        // Get or create the playlist
-        const user = await spotifyApi.getMe();
-        const playlist = await spotifyApi.getPlaylist('0Rr8nCqR2E4yqRE9DdFmY9');
-        console.log('playlist fetched: ', playlist);
-
         // Replace playlist tracks
-        console.log('updating the playlist',trackUris);
+        const playlist = await spotifyApi.getPlaylist('0Rr8nCqR2E4yqRE9DdFmY9');
         await spotifyApi.replaceTracksInPlaylist(playlist.body.id, trackUris);
         console.log('Playlist updated successfully!');
+        
     } catch (err) {
+        if (err.message.includes('token expired')) {
+            console.log('Access token expired. Refreshing...');
+            // await refreshAccessToken(); // Refresh the token
+            // return updatePlaylist(); // Retry the function
+        }
         console.error('Error updating playlist:', err.message);
     }
 };
 
+
 // Schedule the job (Every Sunday at 12:00 PM)
-schedule.scheduleJob({ hour: 12, minute: 0, dayOfWeek: 0 }, updatePlaylist);
+// schedule.scheduleJob({ hour: 12, minute: 0, dayOfWeek: 0 }, async () => {
+//     try {
+//         await refreshAccessToken(); // Ensure the access token is valid
+//         await updatePlaylist(); // Run the task
+//     } catch (err) {
+//         console.error('Error during scheduled job:', err.message);
+//     }
+// });
 
 // Run immediately (for testing purposes)
-// updatePlaylist();
+updatePlaylist();
 
 // Start the Express server
 app.listen(3000, () => {
